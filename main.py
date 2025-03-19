@@ -52,7 +52,7 @@ type1_devices = {
 # Database configuration
 DB_CONFIG = {
     "dbname": "klvin_iot",
-    "user": "postgres",
+    "user": "klvin",
     "password": "K!v1n@1234",
     "host": "localhost",
     "port": "5432",
