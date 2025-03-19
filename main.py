@@ -2,12 +2,57 @@ import psycopg
 import pandas as pd
 import json
 from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
+import time
+import logging
+from apscheduler.schedulers.background import BackgroundScheduler
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("device_metrics.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("device_metrics")
+
+# Device configuration
+type1_devices = {
+    "HFLI001": {
+        "deployed_at": "2025-1-17",
+        "threshold": 0.39,
+        "sensor": 6,
+    },
+    "HFLT001": {"deployed_at": "2025-2-8", "threshold": 0.41, "sensor": 6},
+    "HFLT002": {"deployed_at": "2025-2-8", "threshold": 0.41, "sensor": 6},
+    "STMT002": {
+        "deployed_at": "2025-2-12",
+        "threshold": "0.5",
+        "sensor": 1,
+    },
+    "STMT003": {"deployed_at": "2025-1-9", "threshold": 0.23, "sensor": 6},
+    "STMT004": {"deployed_at": "2025-1-12", "threshold": 0.15, "sensor": 5},
+    "JKFL001": {
+        "deployed_at": "2025-2-14",
+        "threshold": 0.15,
+        "sensor": 6,
+    },
+    "JKFL002": {
+        "deployed_at": "2025-2-14",
+        "threshold": 0.17,
+        "sensor": 6,
+    },
+    "JKFL003": {"deployed_at": "2025-1-7", "threshold": 0.41, "sensor": 6},
+    "HFLV002": {"deployed_at": "2025-2-26", "threshold": 0.41, "sensor": 6},
+    "HFLV001": {"deployed_at": "2025-2-26", "threshold": 0.41, "sensor": 6},
+    "HFLV003": {"deployed_at": "2025-2-26", "threshold": 0.41, "sensor": 6},
+}
 
 # Database configuration
 DB_CONFIG = {
     "dbname": "klvin_iot",
-    "user": "klvin",
+    "user": "postgres",
     "password": "K!v1n@1234",
     "host": "localhost",
     "port": "5432",
@@ -19,12 +64,12 @@ def connect_to_db():
     try:
         return psycopg.connect(**DB_CONFIG)
     except psycopg.Error as e:
-        print(f"Error connecting to database: {e}")
+        logger.error(f"Error connecting to database: {e}")
         raise
 
-def fetch_device_data(device_id, start_date=None, end_date=None):
+def fetch_device_data(device_id, start_date, end_date):
     """
-    Fetch device readings with optional date range filtering
+    Fetch device readings within the specified date range
     """
     try:
         with connect_to_db() as conn:
@@ -33,25 +78,24 @@ def fetch_device_data(device_id, start_date=None, end_date=None):
                     SELECT id, device_id, sensor_readings, time
                     FROM device_readings
                     WHERE device_id = %s
+                    AND time BETWEEN %s AND %s
+                    ORDER BY time;
                 """
-                params = [device_id]
-
-                if start_date and end_date:
-                    query += " AND time BETWEEN %s AND %s"
-                    params.extend([start_date, end_date])
-
-                query += " ORDER BY time;"
-
-                cur.execute(query, params)
+                
+                cur.execute(query, [device_id, start_date, end_date])
                 rows = cur.fetchall()
+
+                if not rows:
+                    logger.info(f"No data found for device {device_id} between {start_date} and {end_date}")
+                    return pd.DataFrame()
 
                 return pd.DataFrame(rows, columns=['id', 'device_id', 'sensor_readings', 'time'])
     except psycopg.Error as e:
-        print(f"Error fetching data: {e}")
-        raise
+        logger.error(f"Error fetching data for device {device_id}: {e}")
+        return pd.DataFrame()
 
-def extract_sensor_value(sensor_readings, sensor_type):
-    """Extract sensor values from JSON with improved error handling"""
+def extract_sensor_value_by_id(sensor_readings, sensor_id):
+    """Extract sensor values from JSON by sensor_id"""
     try:
         if isinstance(sensor_readings, str):
             readings = json.loads(sensor_readings)
@@ -59,135 +103,202 @@ def extract_sensor_value(sensor_readings, sensor_type):
             readings = sensor_readings
 
         for reading in readings:
-            if reading["sensor_type"] == sensor_type:
-                value = reading["value"]
+            if reading.get("sensor_id") == sensor_id:
+                value = reading.get("value")
                 try:
                     return float(value)
                 except (ValueError, TypeError):
                     return None
         return None
-    except (json.JSONDecodeError, AttributeError, KeyError):
+    except (json.JSONDecodeError, AttributeError, KeyError) as e:
+        logger.error(f"Error extracting sensor value: {e}")
         return None
 
-def process_vibration_data(data, positive_threshold=0.39, negative_threshold=-0.39, window_size=15):
-    """Process vibration data and calculate ON/OFF times"""
-    # Extract sensor values
-    for sensor in ["sX", "sY", "sZ", "t1", "t2", "IRT", "s"]:
-        data[sensor] = data["sensor_readings"].apply(lambda x: extract_sensor_value(x, sensor))
-
-    # Convert time and create date column
+def process_vibration_data(data, sensor_id, positive_threshold, negative_threshold, window_minutes=15):
+    """Process vibration data and calculate ON time in minutes"""
+    if data.empty:
+        return 0
+    
+    # Extract sensor values using the provided sensor_id
+    sensor_values = []
+    for idx, row in data.iterrows():
+        value = extract_sensor_value_by_id(row["sensor_readings"], sensor_id)
+        sensor_values.append(value)
+    
+    data['sensor_value'] = sensor_values
+    
+    # Convert time
     data['time'] = pd.to_datetime(data['time'], errors='coerce').dt.tz_localize(None)
-    data['date'] = data['time'].dt.date
-
+    
     # Classification
-    data['ON'] = (data['sZ'] > positive_threshold) | (data['sZ'] < negative_threshold)
+    data['ON'] = (data['sensor_value'] > positive_threshold) | (data['sensor_value'] < negative_threshold)
+    
+    # Calculate total ON time in seconds for this window
+    total_on_seconds = 0
+    
+    if len(data) > 1 and any(data['ON']):
+        # Sort by time
+        data = data.sort_values('time')
+        
+        # Get start and end times
+        start_time = data['time'].min()
+        end_time = data['time'].max()
+        
+        # Calculate time differences between consecutive readings
+        data['next_time'] = data['time'].shift(-1)
+        data['time_diff'] = (data['next_time'] - data['time']).dt.total_seconds()
+        
+        # For the last row, set time_diff to 0
+        data.loc[data.index[-1], 'time_diff'] = 0
+        
+        # Calculate ON time
+        for idx, row in data.iterrows():
+            if row['ON'] and not pd.isna(row['time_diff']):
+                # If this reading is ON, count the time until the next reading
+                total_on_seconds += row['time_diff']
+    
+    # Convert seconds to minutes (round to nearest minute)
+    total_on_minutes = round(total_on_seconds / 60)
+    
+    return total_on_minutes
 
-    results = []
-    window_delta = pd.Timedelta(minutes=window_size)
+def update_machine_metrics(device_id, metric_type, metric_data):
+    """Update the machine_metrics table with the new metrics"""
+    try:
+        with connect_to_db() as conn:
+            with conn.cursor() as cur:
+                # Check if an entry for today already exists
+                query = """
+                    SELECT metric_id, metric_data
+                    FROM machine_metrics
+                    WHERE device_id = %s
+                    AND metric_type = %s
+                    AND metric_date = CURRENT_DATE;
+                """
+                
+                cur.execute(query, [device_id, metric_type])
+                existing = cur.fetchone()
+                
+                if existing:
+                    # Update existing entry
+                    query = """
+                        UPDATE machine_metrics
+                        SET metric_data = %s, created_at = NOW()
+                        WHERE metric_id = %s;
+                    """
+                    cur.execute(query, [existing[1] + metric_data, existing[0]])
+                    logger.info(f"Updated metrics for device {device_id}, type {metric_type}: +{metric_data} minutes")
+                else:
+                    # Insert new entry
+                    query = """
+                        INSERT INTO machine_metrics
+                        (device_id, metric_type, metric_data, metric_date)
+                        VALUES (%s, %s, %s, CURRENT_DATE);
+                    """
+                    cur.execute(query, [device_id, metric_type, metric_data])
+                    logger.info(f"Inserted new metrics for device {device_id}, type {metric_type}: {metric_data} minutes")
+                
+                conn.commit()
+    except psycopg.Error as e:
+        logger.error(f"Error updating machine metrics for device {device_id}: {e}")
 
-    for date, group in data.groupby('date'):
-        group = group.sort_values('time')
-        total_on_seconds = 0
+def process_device(device_id, device_config):
+    """Process a single device and update metrics"""
+    logger.info(f"Processing device: {device_id}")
+    
+    # Skip offline devices
+    if device_config["threshold"] == "OFFLINE":
+        logger.info(f"Device {device_id} is marked as OFFLINE, skipping")
+        return
+    
+    try:
+        # Convert threshold to float
+        threshold = float(device_config["threshold"])
+    except (ValueError, TypeError):
+        logger.error(f"Invalid threshold for device {device_id}: {device_config['threshold']}")
+        return
+    
+    # Get deployed date
+    try:
+        deployed_date = datetime.strptime(device_config["deployed_at"], "%Y-%m-%d")
+    except ValueError:
+        logger.error(f"Invalid deployment date for device {device_id}: {device_config['deployed_at']}")
+        return
+    
+    # Calculate time window for this run
+    end_time = datetime.now()
+    start_time = end_time - timedelta(minutes=15)
+    
+    # Skip if current time is before deployment date
+    if end_time.date() < deployed_date.date():
+        logger.info(f"Device {device_id} deployment date ({deployed_date.date()}) is in the future, skipping")
+        return
+    
+    # Adjust start_time if it's before deployment date
+    if start_time.date() < deployed_date.date():
+        start_time = deployed_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # Fetch data for the last 15 minutes
+    data = fetch_device_data(device_id, start_time, end_time)
+    
+    if data.empty:
+        logger.info(f"No data found for device {device_id} in the specified time window")
+        return
+    
+    # Process vibration data
+    sensor_id = device_config["sensor"]
+    on_minutes = process_vibration_data(
+        data,
+        sensor_id,
+        threshold,  # Positive threshold
+        -threshold  # Negative threshold
+    )
+    
+    if on_minutes > 0:
+        # Update machine metrics table
+        update_machine_metrics(device_id, "op_hours", on_minutes)
+    else:
+        logger.info(f"Device {device_id} was not ON during this period")
 
-        i = 0
-        while i < len(group):
-            if group.iloc[i]['ON']:
-                current_time = group.iloc[i]['time']
-                window_end_time = current_time + window_delta
-
-                # Find all points in the window
-                window_data = group[
-                    (group['time'] >= current_time) &
-                    (group['time'] < window_end_time)
-                ]
-
-                if len(window_data) > 1:
-                    time_diff = (window_data['time'].max() - window_data['time'].min()).total_seconds()
-                    total_on_seconds += min(time_diff, window_delta.total_seconds())
-
-                i += len(window_data)
-            else:
-                i += 1
-
-        # Calculate hours and minutes
-        total_seconds_in_day = 24 * 3600
-        total_off_seconds = total_seconds_in_day - total_on_seconds
-
-        on_hours, on_minutes = divmod(int(total_on_seconds // 60), 60)
-        off_hours, off_minutes = divmod(int(total_off_seconds // 60), 60)
-
-        results.append({
-            'date': date,
-            'on_hours': on_hours,
-            'on_minutes': on_minutes,
-            'off_hours': off_hours,
-            'off_minutes': off_minutes,
-            'total_on_seconds': total_on_seconds
-        })
-
-    return results, data
-
-def plot_vibration_data(data, positive_threshold, negative_threshold):
-    """Create visualization of vibration data"""
-    plt.figure(figsize=(15, 8))
-
-    for date, day_data in data.groupby('date'):
-        plt.plot(day_data['time'], day_data['sZ'],
-                label=f'sZ Values ({date})', alpha=0.7)
-
-    plt.axhline(y=positive_threshold, color='r', linestyle='--',
-                label=f'Positive Threshold ({positive_threshold})')
-    plt.axhline(y=negative_threshold, color='b', linestyle='--',
-                label=f'Negative Threshold ({negative_threshold})')
-
-    plt.title('Vibration (sZ) Values with Thresholds')
-    plt.xlabel('Time')
-    plt.ylabel('sZ Value')
-    plt.legend()
-    plt.grid(True)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    return plt
+def process_all_devices():
+    """Process all devices in the configuration"""
+    logger.info("Starting device metrics processing job")
+    
+    for device_id, config in type1_devices.items():
+        try:
+            process_device(device_id, config)
+        except Exception as e:
+            logger.error(f"Error processing device {device_id}: {e}")
+    
+    logger.info("Completed device metrics processing job")
 
 def main():
-    # Configuration
-    DEVICE_ID = 'JKFL001'
-    POSITIVE_THRESHOLD = 0.15
-    NEGATIVE_THRESHOLD = -0.15
-    WINDOW_SIZE = 15  # minutes
-
+    """Main function to start the scheduler"""
+    logger.info("Starting device metrics processing service")
+    
+    # Create scheduler
+    scheduler = BackgroundScheduler()
+    
+    # Schedule the job to run every 15 minutes
+    scheduler.add_job(process_all_devices, 'interval', minutes=15)
+    
+    # Start the scheduler
+    scheduler.start()
+    
+    logger.info("Scheduler started, processing will occur every 15 minutes")
+    
     try:
-        # Fetch data
-        print("Fetching data from database...")
-        data = fetch_device_data(DEVICE_ID)
-
-        if data.empty:
-            print("No data found for the specified device.")
-            return
-
-        # Process data
-        print("Processing vibration data...")
-        results, processed_data = process_vibration_data(
-            data,
-            POSITIVE_THRESHOLD,
-            NEGATIVE_THRESHOLD,
-            WINDOW_SIZE
-        )
-
-        # Print results
-        print("\nResults in format: date, ON hours:minutes, OFF hours:minutes")
-        for result in results:
-            print(f"{result['date']},{result['on_hours']:02}:{result['on_minutes']:02},"
-                  f"{result['off_hours']:02}:{result['off_minutes']:02}")
-
-        # Create and show plot
-        print("\nGenerating visualization...")
-        plot = plot_vibration_data(processed_data, POSITIVE_THRESHOLD, NEGATIVE_THRESHOLD)
-        plot.show()
-
-    except Exception as e:
-        print(f"An error occurred: {e}")
+        # Keep the main thread alive
+        while True:
+            time.sleep(60)
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Shutting down scheduler")
+        scheduler.shutdown()
+        logger.info("Scheduler shutdown complete")
 
 if __name__ == "__main__":
+    # Run once immediately on startup
+    process_all_devices()
+    
+    # Then start the scheduler for subsequent runs
     main()
