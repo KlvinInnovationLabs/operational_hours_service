@@ -18,30 +18,14 @@ logger = logging.getLogger("historical_metrics")
 
 # Device configuration
 type1_devices = {
-    "HFLI001": {
-        "deployed_at": "2025-1-17",
-        "threshold": 0.39,
-        "sensor": 6,
-    },
+    "HFLI001": {"deployed_at": "2025-1-17", "threshold": 0.39, "sensor": 6},
     "HFLT001": {"deployed_at": "2025-2-8", "threshold": 0.41, "sensor": 6},
     "HFLT002": {"deployed_at": "2025-2-8", "threshold": 0.41, "sensor": 6},
-    "STMT002": {
-        "deployed_at": "2025-2-12",
-        "threshold": "0.5",
-        "sensor": 1,
-    },
+    "STMT002": {"deployed_at": "2025-2-12", "threshold": 0.5, "sensor": 1},
     "STMT003": {"deployed_at": "2025-1-9", "threshold": 0.23, "sensor": 6},
     "STMT004": {"deployed_at": "2025-1-12", "threshold": 0.15, "sensor": 5},
-    "JKFL001": {
-        "deployed_at": "2025-2-14",
-        "threshold": 0.15,
-        "sensor": 6,
-    },
-    "JKFL002": {
-        "deployed_at": "2025-2-14",
-        "threshold": 0.17,
-        "sensor": 6,
-    },
+    "JKFL001": {"deployed_at": "2025-2-14", "threshold": "OFFLINE", "sensor": 6},
+    "JKFL002": {"deployed_at": "2025-2-14", "threshold": 0.17, "sensor": 6},
     "JKFL003": {"deployed_at": "2025-1-7", "threshold": 0.41, "sensor": 6},
     "HFLV002": {"deployed_at": "2025-2-26", "threshold": 0.41, "sensor": 6},
     "HFLV001": {"deployed_at": "2025-2-26", "threshold": 0.41, "sensor": 6},
