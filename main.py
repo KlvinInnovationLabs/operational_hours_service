@@ -152,9 +152,9 @@ def plot_vibration_data(data, positive_threshold, negative_threshold):
 
 def main():
     # Configuration
-    DEVICE_ID = 'HFLI001'
-    POSITIVE_THRESHOLD = 0.39
-    NEGATIVE_THRESHOLD = -0.39
+    DEVICE_ID = 'JKFL001'
+    POSITIVE_THRESHOLD = 0.15
+    NEGATIVE_THRESHOLD = -0.15
     WINDOW_SIZE = 15  # minutes
 
     try:

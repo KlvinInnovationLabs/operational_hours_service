@@ -9,4 +9,5 @@ dependencies = [
     "pandas>=2.2.3",
     "psycopg>=3.2.6",
     "psycopg2>=2.9.10",
+    "pyqt5>=5.15.11",
 ]
