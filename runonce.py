@@ -24,7 +24,7 @@ type1_devices = {
     "STMT002": {"deployed_at": "2025-2-12", "threshold": 0.5, "sensor": 1},
     "STMT003": {"deployed_at": "2025-1-9", "threshold": 0.23, "sensor": 6},
     "STMT004": {"deployed_at": "2025-1-12", "threshold": 0.15, "sensor": 5},
-    "JKFL001": {"deployed_at": "2025-2-14", "threshold": "OFFLINE", "sensor": 6},
+    "JKFL001": {"deployed_at": "2025-2-14", "threshold": 0.1, "sensor": 6},
     "JKFL002": {"deployed_at": "2025-2-14", "threshold": 0.17, "sensor": 6},
     "JKFL003": {"deployed_at": "2025-1-7", "threshold": 0.41, "sensor": 6},
     "HFLV002": {"deployed_at": "2025-2-26", "threshold": 0.41, "sensor": 6},
@@ -35,7 +35,7 @@ type1_devices = {
 # Database configuration
 DB_CONFIG = {
     "dbname": "klvin_iot",
-    "user": "klvin",
+    "user": "postgres",
     "password": "K!v1n@1234",
     "host": "localhost",
     "port": "5432",
@@ -150,16 +150,15 @@ def process_vibration_data(data, sensor_id, positive_threshold, negative_thresho
         total_on_seconds = 0
         for idx, row in day_data.iterrows():
             if row['ON'] and not pd.isna(row['time_diff']):
-                # Limit any individual diff to a maximum of 15 minutes
+                # Limit any individual diff to a maximum of 15 hours
                 # (to avoid overestimating when there are large gaps)
                 diff = min(row['time_diff'], 15 * 60)
                 total_on_seconds += diff
         
-        # Convert seconds to minutes (round to nearest minute)
-        total_on_minutes = round(total_on_seconds / 60)
-        
+        # Convert seconds to hours
+        total_on_hours = total_on_seconds / 1440        
         # Store results
-        results[date] = total_on_minutes
+        results[date] = total_on_hours
     
     return results
 
@@ -191,7 +190,7 @@ def insert_machine_metrics(device_id, metric_type, date, metric_data):
                         VALUES (%s, %s, %s, %s);
                     """
                     cur.execute(query, [device_id, metric_type, metric_data, date])
-                    logger.info(f"Inserted metrics for device {device_id}, date {date}: {metric_data} minutes")
+                    logger.info(f"Inserted metrics for device {device_id}, date {date}: {metric_data} hours")
                 
                 conn.commit()
     except psycopg.Error as e:
@@ -236,10 +235,10 @@ def process_device_historical(device_id, device_config, end_date=None):
         -threshold  # Negative threshold
     )
     
-    # Insert metrics for each day
-    for date, minutes in daily_metrics.items():
-        if minutes > 0:
-            insert_machine_metrics(device_id, "op_hours", date, minutes)
+    # Insert hours for each day
+    for date, hours in daily_metrics.items():
+        if hours > 0:
+            insert_machine_metrics(device_id, "op_hours", date, hours)
     
     logger.info(f"Processed {len(daily_metrics)} days of data for device {device_id}")
 
@@ -260,8 +259,6 @@ def main():
     parser = argparse.ArgumentParser(description='Process historical device metrics')
     parser.add_argument('--device', help='Process only this device ID')
     parser.add_argument('--end-date', help='End date for processing (YYYY-MM-DD)')
-    parser.add_argument('--clear-existing', action='store_true', 
-                      help='Clear existing metrics before processing')
     args = parser.parse_args()
     
     # Convert end date if provided
@@ -273,21 +270,6 @@ def main():
         except ValueError:
             logger.error(f"Invalid end date format: {args.end_date}. Use YYYY-MM-DD.")
             return
-    
-    # Clear existing metrics if requested
-    if args.clear_existing:
-        try:
-            with connect_to_db() as conn:
-                with conn.cursor() as cur:
-                    query = "DELETE FROM machine_metrics WHERE metric_type = 'op_hours'"
-                    cur.execute(query)
-                    count = cur.rowcount
-                    conn.commit()
-                    logger.info(f"Cleared {count} existing metric records")
-        except psycopg.Error as e:
-            logger.error(f"Error clearing existing metrics: {e}")
-            return
-    
     # Process specific device or all devices
     if args.device:
         if args.device in type1_devices:

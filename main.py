@@ -264,7 +264,7 @@ def main():
     scheduler = BackgroundScheduler()
     
     # Schedule the job to run every 15 minutes
-    scheduler.add_job(process_all_devices, 'interval', minutes=15)
+    scheduler.add_job(process_all_devices, 'interval', minutes=1440)
     
     # Start the scheduler
     scheduler.start()
